@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Rainbow After the Rain</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #060a14; overflow: hidden; font-family: 'Hiragino Kaku Gothic Pro', sans-serif; }
+
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(6,10,20,0.96); z-index: 100; transition: opacity 2s;
+      color: #b4d0ff; text-align: center; cursor: pointer; gap: 12px;
+    }
+    #overlay h1 { font-size: 28px; letter-spacing: 0.35em; font-weight: 300; }
+    #overlay .sub { font-size: 14px; letter-spacing: 0.2em; opacity: 0.6; margin-top: 8px; }
+    #overlay .tap { font-size: 12px; letter-spacing: 0.1em; opacity: 0.4; margin-top: 20px;
+      animation: blink 2s ease-in-out infinite; }
+    @keyframes blink { 0%,100%{opacity:0.4} 50%{opacity:0.9} }
+
+    /* p5のcanvasをタッチ通過させる */
+    canvas { pointer-events: none; }
+
+    #messageBox {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      display: none; flex-direction: column; align-items: center;
+      padding: 16px 20px 28px;
+      background: linear-gradient(to top, rgba(4,8,20,0.95) 60%, transparent);
+      z-index: 200;
+      pointer-events: auto;
+    }
+    #messageBox.show { display: flex; animation: slideUp 1.8s ease forwards; }
+    @keyframes slideUp {
+      from { opacity:0; transform: translateY(40px); }
+      to   { opacity:1; transform: translateY(0); }
+    }
+    #messageLabel {
+      color: rgba(190,220,255,0.7); font-size: 13px;
+      letter-spacing: 0.18em; margin-bottom: 10px;
+    }
+    #messageRow { display:flex; width:100%; max-width:460px; gap:8px; }
+    #messageInput {
+      flex:1; background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(140,200,255,0.25); border-radius: 999px;
+      color: #cce8ff; font-size: 15px; padding: 10px 18px; outline: none;
+      letter-spacing: 0.06em;
+      pointer-events: auto;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+    #messageInput::placeholder { color: rgba(160,200,255,0.3); }
+    #messageInput:focus { border-color: rgba(140,210,255,0.6); }
+    #sendBtn {
+      background: rgba(80,160,255,0.18); border: 1px solid rgba(140,200,255,0.35);
+      border-radius: 999px; color: #a8d8ff; font-size: 14px; padding: 10px 20px;
+      cursor: pointer; transition: background 0.3s; white-space: nowrap; letter-spacing: 0.05em;
+    }
+    #sendBtn:active { background: rgba(80,160,255,0.4); }
+    #earphone-note {
+      font-size: 11px; color: rgba(160,200,255,0.4);
+      letter-spacing: 0.1em; margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>Rainbow After the Rain</h1>
+  <div class="sub">🎧 Best with headphones</div>
+  <div class="sub" style="margin-top:4px; font-size:13px;">Tap the umbrella in the rain</div>
+  <div class="tap">Tap anywhere to begin ▼</div>
+</div>
+
+<div id="messageBox">
+  <div id="messageLabel">✦ A message to someone you miss ✦</div>
+  <div id="messageRow">
+    <input id="messageInput" type="text" placeholder="Write here, let it dissolve into the sky…" maxlength="30">
+    <button id="sendBtn" onclick="sendMessage()">Release</button>
+  </div>
+  <div id="earphone-note">🎧 Use headphones for a deeper experience</div>
+</div>
+
+<script>
+let audioCtx, isStarted = false;
+let phase = 'RAIN';
+let phaseTimer = 0;
+let raindrops = [];
+let umbrella = null;
+let particles = [];
+let floatingMessages = []; // 空に溶けていくメッセージ群
+let rainFade = 1.0;
+let rainbowAlpha = 0;
+let skyBright = 0;
+let personAlpha = 0;
+let breathe = 0; // 虹の呼吸位相
+let rainPanner = null; // 3Dオーディオ用
+
+// ===== オーディオ初期化 =====
+function initAudio() {
+  if (isStarted) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    startRainLoop();
+  } catch(e) {}
+  isStarted = true;
+  const ov = document.getElementById('overlay');
+  if (ov) { ov.style.opacity = '0'; setTimeout(() => { if(ov.parentNode) ov.remove(); }, 2000); }
+}
+
+window.addEventListener('load', () => {
+  const ov = document.getElementById('overlay');
+  if (!ov) return;
+  ov.addEventListener('click', initAudio, { once: true });
+  ov.addEventListener('touchstart', e => { e.preventDefault(); initAudio(); }, { once: true, passive: false });
+});
+
+// ===== バイノーラル風 雨ループ =====
+let rainGainNode = null;
+function startRainLoop() {
+  if (!audioCtx) return;
+  // 左右それぞれ独立したノイズで立体感
+  function makeRainChannel(pan, vol) {
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * 0.04;
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+
+    // ローパスフィルタ（雨らしい音に）
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1800;
+
+    const panner = audioCtx.createStereoPanner();
+    panner.pan.value = pan;
+
+    const gain = audioCtx.createGain();
+    gain.gain.value = vol;
+
+    src.connect(filter);
+    filter.connect(panner);
+    panner.connect(gain);
+    gain.connect(audioCtx.destination);
+    src.start();
+    return { gain, panner };
+  }
+
+  const left  = makeRainChannel(-0.6, 0.25);
+  const right = makeRainChannel( 0.6, 0.25);
+  rainGainNode = { left, right };
+
+  // 雨音が止んでいくアニメーション用
+  window._rainGains = [left.gain, right.gain];
+}
+
+function fadeRainOut(duration) {
+  if (!window._rainGains) return;
+  window._rainGains.forEach(g => {
+    const now = audioCtx.currentTime;
+    g.gain.linearRampToValueAtTime(0, now + duration);
+  });
+}
+
+function playBell(freq, vol, pan) {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const panner = audioCtx.createStereoPanner();
+  panner.pan.value = (pan !== undefined) ? pan : 0;
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(freq, now);
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(vol || 0.12, now + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 3.5);
+  osc.connect(gain); gain.connect(panner); panner.connect(audioCtx.destination);
+  osc.start(); osc.stop(now + 3.5);
+}
+
+// ===== メッセージ：空に溶けていく =====
+function sendMessage() {
+  const input = document.getElementById('messageInput');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  // ベルの音を左から右へパン移動（空へ飛んでいく感じ）
+  playBell(528, 0.10, -0.5);
+  setTimeout(() => playBell(660, 0.07, 0.5), 600);
+
+  // 空に溶けていくメッセージオブジェクトを作成
+  floatingMessages.push({
+    text: msg,
+    x: window.innerWidth / 2,
+    y: window.innerHeight * 0.65,
+    alpha: 255,
+    vy: -0.5,        // 上昇速度
+    vx: (Math.random() - 0.5) * 0.3,
+    size: 18,
+    life: 255
+  });
+}
+
+// ===== p5.js メイン =====
+new p5((s) => {
+
+  s.setup = () => {
+    s.createCanvas(s.windowWidth, s.windowHeight);
+    s.colorMode(s.HSB, 360, 100, 100, 255);
+    s.textFont('Hiragino Kaku Gothic Pro');
+
+    for (let i = 0; i < 90; i++) raindrops.push(new RainDrop(s, true));
+
+    umbrella = {
+      x: s.width / 2, y: s.height * 0.52,
+      size: 95, clicked: false, ripple: 0
+    };
+  };
+
+  s.windowResized = () => {
+    s.resizeCanvas(s.windowWidth, s.windowHeight);
+    if (umbrella) { umbrella.x = s.width/2; umbrella.y = s.height*0.52; }
+  };
+
+  s.draw = () => {
+    breathe += 0.018; // 虹の呼吸
+
+    if (!isStarted) {
+      s.background(220, 35, 6);
+      drawRainBG(1.0);
+      return;
+    }
+
+    phaseTimer++;
+
+    if (phase === 'RAIN') {
+      drawSky(0);
+      drawRainBG(1.0);
+      if (phaseTimer > 100) drawUmbrella();
+
+    } else if (phase === 'TRANSITION') {
+      rainFade = s.max(0, 1.0 - phaseTimer / 260);
+      drawSky(0);
+      drawRainBG(rainFade);
+      if (phaseTimer === 10) fadeRainOut(5.0);
+      if (phaseTimer > 260) { phase = 'RAINBOW_GROW'; phaseTimer = 0; }
+
+    } else if (phase === 'RAINBOW_GROW') {
+      let dur = 1200;
+      rainbowAlpha = s.min(1.0, phaseTimer / dur);
+      skyBright    = s.min(1.0, phaseTimer / dur);
+      drawSky(skyBright * 0.65);
+      drawClouds(phaseTimer);
+      drawRainbow(rainbowAlpha);
+      drawGround(skyBright);
+      if (phaseTimer % 85 === 0 && rainbowAlpha < 1.0) {
+        let notes = [261,294,330,349,392,440,494,523];
+        let idx = Math.min(7, Math.floor(rainbowAlpha * 8));
+        let pan = s.map(idx, 0, 7, -0.7, 0.7); // 左から右へ
+        playBell(notes[idx], 0.07, pan);
+      }
+      if (phaseTimer >= dur) { phase = 'CLEAR'; phaseTimer = 0; playBell(659, 0.13, 0); }
+
+    } else if (phase === 'CLEAR') {
+      drawSky(1.0); drawSun(phaseTimer);
+      drawClouds(phaseTimer); drawRainbow(1.0); drawGround(1.0);
+      if (phaseTimer > 180) { phase = 'PERSON'; phaseTimer = 0; }
+
+    } else if (phase === 'PERSON') {
+      drawSky(1.0);
+      drawSun(phaseTimer + 180);
+      drawClouds(phaseTimer + 180);
+      drawRainbow(1.0);
+      drawGround(1.0);
+      personAlpha = s.min(1.0, phaseTimer / 320);
+      drawPerson(personAlpha);
+      drawPuddleReflection(personAlpha); // 水たまり反射
+      if (phaseTimer === 60) {
+        document.getElementById('messageBox').classList.add('show');
+      }
+    }
+
+    // 空に溶けていくメッセージ
+    drawFloatingMessages();
+
+    // パーティクル
+    for (let i = particles.length - 1; i >= 0; i--) {
+      particles[i].update(); particles[i].display();
+      if (particles[i].isDead()) particles.splice(i, 1);
+    }
+  };
+
+  // ===== 空 =====
+  function drawSky(bright) {
+    let c1 = s.lerpColor(s.color(220,42,14), s.color(205,52,85), bright);
+    let c2 = s.lerpColor(s.color(220,30,7),  s.color(36,25,98),  bright);
+    for (let y = 0; y < s.height * 0.75; y++) {
+      let t = y / (s.height * 0.75);
+      s.stroke(s.lerpColor(c1, c2, t));
+      s.line(0, y, s.width, y);
+    }
+  }
+
+  // ===== 地面 =====
+  function drawGround(bright) {
+    let gy = s.height * 0.75;
+    for (let y = gy; y < s.height; y++) {
+      let t = (y - gy) / (s.height - gy);
+      s.stroke(100, s.lerp(38,18,t)*bright+8, s.lerp(38,22,t));
+      s.line(0, y, s.width, y);
+    }
+    // 水たまり（光る）
+    if (bright > 0.2) {
+      s.noStroke();
+      // 水たまり1
+      s.fill(205, 30, 95, bright * 65);
+      s.ellipse(s.width*0.27, s.height*0.83, 120, 20);
+      // 水たまり2
+      s.fill(205, 25, 90, bright * 48);
+      s.ellipse(s.width*0.73, s.height*0.88, 88, 14);
+      // 光の反射ハイライト
+      s.fill(0, 0, 100, bright * 40);
+      s.ellipse(s.width*0.27 - 15, s.height*0.83 - 3, 30, 5);
+      s.ellipse(s.width*0.73 - 10, s.height*0.88 - 2, 20, 3);
+    }
+  }
+
+  // ===== 水たまりに映る人のシルエット（淡い光） =====
+  function drawPuddleReflection(alpha) {
+    if (alpha < 0.1) return;
+    let a = alpha * 80; // 薄めに
+    let cx = s.width * 0.27; // 水たまりの位置
+    let py = s.height * 0.83;
+
+    s.push();
+    // 水たまりの中に、ぼんやりとした逆さシルエット
+    s.noStroke();
+    // 後光の反射
+    for (let i=4;i>=1;i--) {
+      s.fill(40, 30, 100, a * 0.04 * i);
+      s.ellipse(cx, py, 40 + i*12, 8 + i*2);
+    }
+    // シルエットの反射（とても薄く）
+    s.fill(30, 10, 95, a * 0.5);
+    s.ellipse(cx, py - 2, 12, 4);
+    s.ellipse(cx, py + 1, 18, 3);
+    s.pop();
+  }
+
+  // ===== 雲 =====
+  function drawCloud(cx, cy, scale, alpha) {
+    s.noStroke();
+    let blobs = [
+      [0,0,55],[-45,10,42],[45,10,42],[-22,-22,38],
+      [22,-22,38],[-68,18,32],[68,18,32],[0,20,36]
+    ];
+    s.fill(0, 0, 80, alpha * 0.4);
+    for (let b of blobs)
+      s.ellipse(cx+b[0]*scale, cy+b[1]*scale+6*scale, b[2]*scale*2, b[2]*scale*1.4);
+    s.fill(0, 0, 100, alpha);
+    for (let b of blobs)
+      s.ellipse(cx+b[0]*scale, cy+b[1]*scale, b[2]*scale*2, b[2]*scale*1.4);
+    s.fill(0, 0, 100, alpha * 0.3);
+    s.ellipse(cx-10*scale, cy-20*scale, 40*scale, 20*scale);
+  }
+
+  function drawClouds(t) {
+    let d = t * 0.07;
+    drawCloud((s.width*0.18+d)%(s.width+160)-80, s.height*0.12, 0.9, 48);
+    drawCloud((s.width*0.72+d*0.6)%(s.width+160)-80, s.height*0.07, 0.7, 34);
+    drawCloud((s.width*0.48+d*0.38)%(s.width+160)-80, s.height*0.19, 0.5, 18);
+  }
+
+  // ===== 太陽 =====
+  function drawSun(t) {
+    let sx=s.width*0.85, sy=s.height*0.1;
+    s.noStroke();
+    for (let i=5;i>=1;i--) { s.fill(45,70,100,14*i); s.circle(sx,sy,32+i*28); }
+    s.fill(44,50,100,225); s.circle(sx,sy,54);
+    for (let a=0;a<8;a++) {
+      let ang=(a/8)*s.TWO_PI+t*0.004;
+      s.stroke(44,45,100,70); s.strokeWeight(1.5);
+      s.line(sx+Math.cos(ang)*36,sy+Math.sin(ang)*36,sx+Math.cos(ang)*60,sy+Math.sin(ang)*60);
+    }
+  }
+
+  // ===== 虹（呼吸する彩度・明度） =====
+  function drawRainbow(alpha) {
+    s.noFill();
+    let cx=s.width/2, cy=s.height*0.78;
+    let hues=[0,30,55,120,200,260,290];
+    // 呼吸：sin波で彩度と明度をゆらす
+    let breathSat  = 90 + Math.sin(breathe) * 6;
+    let breathBri  = 100 + Math.sin(breathe * 1.3) * 3;
+    let breathAlpha = alpha * (200 + Math.sin(breathe * 0.9) * 18);
+
+    for (let i=0;i<7;i++) {
+      let w=s.width*0.95-i*18;
+      let h=s.height*0.85-i*20;
+      // 少しずつ位相をずらして波打つように
+      let sat = breathSat + Math.sin(breathe + i*0.4) * 5;
+      let bri = breathBri + Math.sin(breathe*1.2 + i*0.3) * 2;
+      let al  = breathAlpha + Math.sin(breathe*0.7 + i*0.5) * 12;
+      s.stroke(hues[i], s.constrain(sat,70,100), s.constrain(bri,90,100), s.constrain(al,0,255));
+      s.strokeWeight(12);
+      s.arc(cx,cy,w,h,s.PI,s.TWO_PI);
+      // 内側の淡い光
+      s.stroke(hues[i], 45, 100, alpha*45);
+      s.strokeWeight(5);
+      s.arc(cx,cy,w-9,h-10,s.PI,s.TWO_PI);
+    }
+  }
+
+  // ===== 雨 =====
+  function drawRainBG(fa) {
+    raindrops.forEach(d => { d.update(); d.display(fa); });
+  }
+
+  // ===== 傘 =====
+  function drawUmbrella() {
+    let u = umbrella;
+    s.push();
+    let shake = s.sin(s.frameCount*0.04)*5;
+    s.translate(u.x, u.y+shake);
+    s.noFill();
+    if (u.clicked) s.stroke(195,80,100,255);
+    else           s.stroke(0,0,62,255);
+    s.strokeWeight(3);
+    s.arc(0,0,u.size,u.size*0.68,s.PI,s.TWO_PI);
+    for (let k=-1;k<=1;k++) s.line(k*u.size*0.22,-u.size*0.27,k*u.size*0.22,0);
+    s.line(0,0,0,u.size*0.44);
+    if (u.clicked) {
+      u.ripple=(u.ripple+1.5)%110;
+      s.stroke(195,55,100,s.map(u.ripple,0,110,210,0));
+      s.strokeWeight(1.5); s.noFill(); s.circle(0,0,u.ripple);
+    }
+    if (!u.clicked) {
+      s.noStroke(); s.fill(0,0,92,210);
+      s.textAlign(s.CENTER); s.textSize(15);
+      s.text('Tap', 0, u.size*0.68);
+      let blink=s.abs(s.sin(s.frameCount*0.055));
+      s.fill(0,0,100,blink*190); s.textSize(13);
+      s.text('▼', 0, u.size*0.85);
+    }
+    s.pop();
+  }
+
+  // ===== 人物 =====
+  function drawPerson(alpha) {
+    let a=alpha*255;
+    let cx=s.width*0.5, baseY=s.height*0.73;
+    s.push();
+    for (let i=8;i>=1;i--) {
+      s.noStroke(); s.fill(40,38,100,a*0.038*i);
+      s.ellipse(cx,baseY-58,62+i*30,122+i*28);
+    }
+    for (let i=5;i>=1;i--) {
+      s.fill(200,18,100,a*0.013*i);
+      s.ellipse(cx,baseY-38,105+i*62,205+i*48);
+    }
+    for (let layer=4;layer>=0;layer--) {
+      let sp=layer*6, la=a*(0.14-layer*0.024);
+      s.noStroke(); s.fill(28,12,96,la);
+      s.ellipse(cx,baseY-116,39+sp,43+sp);
+      s.beginShape();
+      s.vertex(cx-22-sp*0.5,baseY-96); s.vertex(cx+22+sp*0.5,baseY-96);
+      s.vertex(cx+32+sp*0.5,baseY-21); s.vertex(cx-32-sp*0.5,baseY-21);
+      s.endShape(s.CLOSE);
+      s.beginShape();
+      s.vertex(cx-30-sp*0.5,baseY-21); s.vertex(cx+30+sp*0.5,baseY-21);
+      s.vertex(cx+56+sp,baseY+5);      s.vertex(cx-56-sp,baseY+5);
+      s.endShape(s.CLOSE);
+    }
+    s.fill(28,9,92,a*0.5); s.noStroke();
+    s.ellipse(cx,baseY-116,30,34);
+    if (alpha>0.3) {
+      for (let i=0;i<7;i++) {
+        let px=cx+s.sin(s.frameCount*0.018+i*1.1)*85;
+        let py=baseY-58+s.cos(s.frameCount*0.013+i*0.95)*55;
+        s.noStroke();
+        s.fill(44,28,100,a*0.55*Math.abs(s.sin(s.frameCount*0.028+i)));
+        s.circle(px,py,5);
+      }
+    }
+    s.pop();
+  }
+
+  // ===== 空に溶けていくメッセージ =====
+  function drawFloatingMessages() {
+    s.push();
+    for (let i = floatingMessages.length - 1; i >= 0; i--) {
+      let m = floatingMessages[i];
+      m.y  += m.vy;
+      m.x  += m.vx;
+      m.vy *= 0.995; // だんだんゆっくり上昇
+      m.vx *= 0.998;
+      m.life -= 0.8; // ゆっくり消える
+
+      if (m.life <= 0) { floatingMessages.splice(i, 1); continue; }
+
+      s.noStroke();
+      s.fill(200, 20, 100, m.life);
+      s.textAlign(s.CENTER);
+      s.textSize(m.size);
+      // 文字もじわじわ大きくなりながら消える
+      let scale = s.map(m.life, 255, 0, 1.0, 1.4);
+      s.push();
+      s.translate(m.x, m.y);
+      s.scale(scale);
+      s.text(m.text, 0, 0);
+      // 光のにじみ
+      s.fill(200, 10, 100, m.life * 0.3);
+      s.textSize(m.size + 4);
+      s.text(m.text, 0, 0);
+      s.pop();
+    }
+    s.pop();
+  }
+
+  // ===== タッチ・クリック =====
+  function checkTap(mx, my) {
+    if (phase !== 'RAIN' || umbrella.clicked || phaseTimer < 100) return;
+    if (s.dist(mx,my,umbrella.x,umbrella.y) < 82) {
+      umbrella.clicked = true;
+      playBell(440, 0.13, 0);
+      for (let i=0;i<12;i++) particles.push(new Particle(s, umbrella.x, umbrella.y));
+      phase = 'TRANSITION'; phaseTimer = 0;
+    }
+  }
+
+  s.mousePressed  = () => checkTap(s.mouseX, s.mouseY);
+  s.touchStarted = (e) => {
+    // メッセージ欄へのタッチはp5に渡さない
+    if (e && e.target) {
+      let t = e.target;
+      if (t.id === 'messageInput' || t.id === 'sendBtn' ||
+          t.closest('#messageBox')) return true;
+    }
+    if (s.touches.length > 0) checkTap(s.touches[0].x, s.touches[0].y);
+    return false;
+  };
+
+  // ===== クラス =====
+  class RainDrop {
+    constructor(s, rand) {
+      this.s=s; this.x=s.random(s.width);
+      this.y=rand?s.random(-s.height,0):-20;
+      this.vel=s.random(1.4,3.0); this.len=s.random(8,18);
+    }
+    update() {
+      this.y+=this.vel;
+      if (this.y>this.s.height+20) { this.x=this.s.random(this.s.width); this.y=-20; }
+    }
+    display(a) {
+      this.s.stroke(212,38,92,115*a);
+      this.s.strokeWeight(1);
+      this.s.line(this.x,this.y,this.x-this.vel*0.25,this.y+this.len);
+    }
+  }
+
+  class Particle {
+    constructor(s,x,y) {
+      this.s=s; this.pos=s.createVector(x,y);
+      this.vel=p5.Vector.random2D().mult(s.random(1,4));
+      this.life=255; this.hue=s.random(180,270);
+    }
+    update(){this.pos.add(this.vel);this.vel.mult(0.94);this.life-=5;}
+    display(){this.s.noStroke();this.s.fill(this.hue,60,100,this.life);this.s.circle(this.pos.x,this.pos.y,4);}
+    isDead(){return this.life<0;}
+  }
+
+});
+</script>
+</body>
+</html>
